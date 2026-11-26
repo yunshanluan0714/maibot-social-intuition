@@ -1,0 +1,41 @@
+{
+  "manifest_version": 2,
+  "id": "github.yunshanluan0714.social-intuition",
+  "version": "1.0.0",
+  "plugin_type": "extension",
+  "name": "熟人社交直觉套件",
+  "description": "常态零存在感静默感知、零主动刷屏的三大熟人社交直觉：生活近况到点自然追问、跨周/跨月既视感翻旧账、以及失踪半月以上老熟人冒泡自然感应；支持启动历史回填与单群物理隔离。",
+  "author": {
+    "name": "yunshanluan0714",
+    "url": "https://github.com/yunshanluan0714"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/yunshanluan0714/maibot-social-intuition",
+    "homepage": "https://github.com/yunshanluan0714/maibot-social-intuition",
+    "documentation": "https://github.com/yunshanluan0714/maibot-social-intuition/blob/main/README.md",
+    "issues": "https://github.com/yunshanluan0714/maibot-social-intuition/issues"
+  },
+  "host_application": {
+    "min_version": "1.3.19",
+    "max_version": "1.4.99"
+  },
+  "sdk": {
+    "min_version": "2.20.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [
+    "chat.get_all_streams",
+    "config.get",
+    "llm.embed",
+    "llm.generate",
+    "message.get_by_time_in_chat"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  }
+}
