@@ -1,4 +1,4 @@
-"""Main plugin wiring for github.yunshanluan0714.social-intuition v1.0.0."""
+"""Main plugin wiring for github.yunshanluan0714.social-intuition v1.0.1."""
 
 from __future__ import annotations
 
@@ -73,6 +73,7 @@ class SocialIntuitionPlugin(MaiBotPlugin):
         self._bot_qq_account = ""
         self._session_to_group: dict[str, str] = {}
         self._session_to_private: dict[str, str] = {}
+        self._member_api_targets: list[tuple[str, str]] | None = None
         self._pending_hints: dict[str, tuple[int, str]] = {}
         self._bg_tasks: set[asyncio.Task[Any]] = set()
         self._backfill_task: asyncio.Task[None] | None = None
@@ -82,9 +83,14 @@ class SocialIntuitionPlugin(MaiBotPlugin):
         await self._refresh_bot_identity()
         await self._warm_stream_mappings()
         self._running = True
+        pending = self._store.pending_manual_names()
+        if pending:
+            task = asyncio.create_task(self._bind_legacy_participants(pending))
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
         if self.config.guard.backfill_on_startup:
             self._backfill_task = asyncio.create_task(self._run_startup_backfill(), name="social-intuition-backfill")
-        self.ctx.logger.info("熟人社交直觉套件 v1.0.0 已加载")
+        self.ctx.logger.info("熟人社交直觉套件 v1.0.1 已加载")
 
     async def on_unload(self) -> None:
         self._running = False
@@ -101,6 +107,9 @@ class SocialIntuitionPlugin(MaiBotPlugin):
 
     async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
         del config_data, version
+        for session_id in list(self._pending_hints):
+            if not self._scope_allowed(self._resolve_scope_group_id(session_id)):
+                self._pending_hints.pop(session_id, None)
         self.ctx.logger.info("熟人社交直觉套件配置已热更新: scope=%s", scope)
 
     async def _refresh_bot_identity(self) -> None:
@@ -164,6 +173,122 @@ class SocialIntuitionPlugin(MaiBotPlugin):
         if allowed and group_id not in allowed:
             return False
         return True
+
+    def _scope_allowed(self, group_id: str) -> bool:
+        return bool(group_id) and self._is_scope_enabled(group_id=group_id, is_private=group_id.startswith("private:"))
+
+    async def _discover_member_api_targets(self) -> list[tuple[str, str]]:
+        if self._member_api_targets is not None:
+            return self._member_api_targets
+        defaults: list[tuple[str, str]] = [
+            ("call_data", "maibot-team.snowluma-adapter.adapter.snowluma.action.call_data"),
+            ("call_data", "maibot-team.snowluma-adapter.adapter.napcat.action.call_data"),
+            ("call_data", "maibot-team.snowluma-adapter.adapter.onebot.action.call_data"),
+        ]
+        list_fn = getattr(getattr(self.ctx, "api", None), "list", None)
+        if not callable(list_fn):
+            self._member_api_targets = defaults
+            return self._member_api_targets
+        try:
+            payload = await list_fn()
+        except Exception:
+            self._member_api_targets = defaults
+            return self._member_api_targets
+        items = payload.get("apis", []) if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
+        discovered: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for kind, suffix in (
+            ("call_data", "action.call_data"),
+            ("call", "action.call"),
+            ("direct", "get_group_member_list"),
+        ):
+            for entry in items:
+                if not isinstance(entry, dict):
+                    continue
+                pid = str(entry.get("plugin_id") or "").strip()
+                name = str(entry.get("name") or "").strip()
+                if not pid or not name:
+                    continue
+                if name == suffix or name.endswith("." + suffix):
+                    full = name if name.startswith(pid + ".") else f"{pid}.{name}"
+                    pair = (kind, full)
+                    if pair not in seen:
+                        seen.add(pair)
+                        discovered.append(pair)
+        self._member_api_targets = discovered or defaults
+        return self._member_api_targets
+
+    @staticmethod
+    def _unwrap_member_list(resp: Any) -> list[dict[str, Any]]:
+        if isinstance(resp, dict):
+            if resp.get("success") is False:
+                return []
+            if "result" in resp:
+                resp = resp["result"]
+            if isinstance(resp, dict) and "data" in resp:
+                resp = resp["data"]
+        return [m for m in resp if isinstance(m, dict)] if isinstance(resp, list) else []
+
+    async def _group_members(self, group_id: str) -> list:
+        api_cap = getattr(self.ctx, "api", None)
+        call_fn = getattr(api_cap, "call", None)
+        if callable(call_fn):
+            targets = await self._discover_member_api_targets()
+            for kind, api_name in targets:
+                try:
+                    if kind == "direct":
+                        resp = await call_fn(api_name, group_id=group_id)
+                    else:
+                        resp = await call_fn(
+                            api_name,
+                            action_name="get_group_member_list",
+                            params={"group_id": group_id},
+                        )
+                except Exception:
+                    continue
+                members = self._unwrap_member_list(resp)
+                if members:
+                    return members
+        return self._store.list_group_members(group_id) if self._store is not None else []
+
+    async def _manual_participant(
+        self, group_id: str, target: str, sender_id: str, members: list | None = None
+    ) -> tuple[str, str] | None:
+        target = target.strip()
+        if group_id.startswith("private:"):
+            uid = group_id.removeprefix("private:")
+            if target.isdigit() and target != uid:
+                return None
+            return uid, target or uid
+        if sender_id and (not target or target == sender_id):
+            return sender_id, sender_id
+        if not target:
+            return None
+        if members is None:
+            members = await self._group_members(group_id)
+        matches = {}
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+            uid = str(member.get("user_id") or "").strip()
+            card = str(member.get("card") or "").strip()
+            nickname = str(member.get("nickname") or "").strip()
+            if uid and target == uid:
+                return uid, card or nickname or uid
+            if uid and target in (card, nickname):
+                matches[uid] = card or nickname or uid
+        return next(iter(matches.items())) if len(matches) == 1 else None
+
+    async def _bind_legacy_participants(self, pending: list[tuple[str, str]]) -> None:
+        members_by_group = {}
+        for group_id, name in pending:
+            if not self._scope_allowed(group_id):
+                continue
+            if not group_id.startswith("private:") and group_id not in members_by_group:
+                members_by_group[group_id] = await self._group_members(group_id)
+            person = await self._manual_participant(group_id, name, "", members_by_group.get(group_id))
+            if person and self._store and self._scope_allowed(group_id):
+                self._store.bind_manual_name(group_id, name, person[0])
 
     def _now_dt(self, now_ts: float | None = None) -> datetime:
         tz = resolve_tz(self.config.guard.timezone)
@@ -256,6 +381,8 @@ class SocialIntuitionPlugin(MaiBotPlugin):
                     for uid, rec in pres_agg.items()
                     if rec[3] > 0 and rec[2] > 0
                 ]
+                if not self._scope_allowed(scope_gid):
+                    continue
                 self._store.bulk_import_history(
                     scope_gid,
                     presence_rows=pres_rows,
@@ -342,7 +469,7 @@ class SocialIntuitionPlugin(MaiBotPlugin):
         plain_text: str,
         now_ts: float,
     ) -> None:
-        if self._store is None:
+        if self._store is None or not self._scope_allowed(scope_group_id):
             return
         cfg = self.config
         now_dt = self._now_dt(now_ts)
@@ -396,6 +523,8 @@ class SocialIntuitionPlugin(MaiBotPlugin):
                         has_old_embs = any(r.embedding is not None for r in old_recs)
                         if cfg.dejavu.use_embedding and has_old_embs:
                             new_emb = await self._embed_text(clean_text)
+                            if not self._scope_allowed(scope_group_id):
+                                return
                         hit = find_best_dejavu_match(
                             clean_text,
                             new_emb,
@@ -408,6 +537,8 @@ class SocialIntuitionPlugin(MaiBotPlugin):
                             days_apart = max(1, int((now_ts - old_rec.created_at) // 86400.0))
                             old_date_str = datetime.fromtimestamp(old_rec.created_at, tz=now_dt.tzinfo).strftime("%m月%d日")
                             ok_dj, angle = await self._verify_dejavu_with_llm(sender_name, old_rec.text, old_date_str, clean_text)
+                            if not self._scope_allowed(scope_group_id):
+                                return
                             if ok_dj:
                                 self._store.mark_utterance_triggered(old_rec.id, scope_group_id, user_id, now_ts)
                                 self._set_pending_hint(
@@ -417,6 +548,8 @@ class SocialIntuitionPlugin(MaiBotPlugin):
                                 )
                 if new_emb is None and cfg.dejavu.enabled and cfg.dejavu.use_embedding:
                     new_emb = await self._embed_text(clean_text)
+                if not self._scope_allowed(scope_group_id):
+                    return
                 self._store.add_utterance(
                     group_id=scope_group_id,
                     user_id=user_id,
@@ -434,6 +567,8 @@ class SocialIntuitionPlugin(MaiBotPlugin):
                     verified = None
                     if cfg.followup.use_llm_verification:
                         verified = await self._verify_followup_with_llm(sender_name, clean_text, cand, now_dt)
+                    if not self._scope_allowed(scope_group_id):
+                        return
                     final_cand = verified if verified is not None else cand
                     if final_cand.event_summary and final_cand.confidence >= float(cfg.followup.min_confidence):
                         rec, inserted = self._store.add_followup(
@@ -520,7 +655,7 @@ class SocialIntuitionPlugin(MaiBotPlugin):
             return unchanged
         session_id = str(kwargs.get("session_id") or "").strip()
         picked = self._pending_hints.pop(session_id, None)
-        if not picked:
+        if not picked or not self._scope_allowed(self._resolve_scope_group_id(session_id)):
             return unchanged
         _, hint = picked
         updated = dict(kwargs)
@@ -562,11 +697,12 @@ class SocialIntuitionPlugin(MaiBotPlugin):
         stream_id: str = "",
         **kwargs: Any,
     ) -> dict[str, Any]:
-        del kwargs
         if self._store is None:
             return {"success": False, "content": "直觉仓库尚未初始化。"}
-        group_id = self._resolve_scope_group_id(stream_id)
-        if not group_id:
+        group_id = self._resolve_scope_group_id(
+            stream_id, explicit_group_id=str(kwargs.get("group_id") or ""), user_id=str(kwargs.get("user_id") or "")
+        )
+        if not stream_id or not self._scope_allowed(group_id):
             return {"success": False, "content": "无法确认当前所属聊天，出于隔离限制拒绝查询。"}
 
         if str(view).strip().lower() == "stats":
@@ -608,7 +744,7 @@ class SocialIntuitionPlugin(MaiBotPlugin):
             ToolParameterInfo(
                 name="user_name",
                 param_type=ToolParamType.STRING,
-                description="add_followup 时的当事人昵称",
+                description="add_followup 时的群友 QQ 号或唯一昵称；私聊可留空",
                 required=False,
             ),
             ToolParameterInfo(
@@ -636,11 +772,12 @@ class SocialIntuitionPlugin(MaiBotPlugin):
         stream_id: str = "",
         **kwargs: Any,
     ) -> dict[str, Any]:
-        del kwargs
         if self._store is None:
             return {"success": False, "content": "直觉仓库尚未初始化。"}
-        group_id = self._resolve_scope_group_id(stream_id)
-        if not group_id:
+        group_id = self._resolve_scope_group_id(
+            stream_id, explicit_group_id=str(kwargs.get("group_id") or ""), user_id=str(kwargs.get("user_id") or "")
+        )
+        if not stream_id or not self._scope_allowed(group_id):
             return {"success": False, "content": "无法确认当前所属聊天，出于隔离限制拒绝修改。"}
 
         act = str(action or "").strip().lower()
@@ -654,7 +791,10 @@ class SocialIntuitionPlugin(MaiBotPlugin):
 
         if act == "add_followup":
             summary = sanitize_text(event_summary)
-            who = str(user_name or "群友").strip()[:32]
+            person = await self._manual_participant(group_id, str(user_name or ""), str(kwargs.get("user_id") or ""))
+            if not person or not self._scope_allowed(group_id):
+                return {"success": False, "content": "无法唯一确认当前会话的成员，请提供当事人的 QQ 号。"}
+            participant_id, who = person
             if not summary:
                 return {"success": False, "content": "请提供事件简述。"}
             now_ts = time.time()
@@ -664,7 +804,7 @@ class SocialIntuitionPlugin(MaiBotPlugin):
             rec, _ = self._store.add_followup(
                 group_id=group_id,
                 session_id=stream_id,
-                user_id=f"manual:{who}",
+                user_id=participant_id,
                 user_name=who,
                 original_text=summary,
                 event_summary=summary[:50],

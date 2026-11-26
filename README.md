@@ -1,4 +1,4 @@
-# `maibot-social-intuition`（`github.yunshanluan0714.social-intuition`） (v1.0.0) — 熟人社交直觉套件
+# `maibot-social-intuition`（`github.yunshanluan0714.social-intuition`） (v1.0.1) — 熟人社交直觉套件
 
 平时零存在感静默感知、**常态 0 Prompt 注入、零主动刷屏**，只在熟人自己冒泡聊天时触发 3 项极其自然的人情味直觉：
 

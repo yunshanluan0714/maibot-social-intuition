@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "github.yunshanluan0714.social-intuition",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "plugin_type": "extension",
   "name": "熟人社交直觉套件",
   "description": "常态零存在感静默感知、零主动刷屏的三大熟人社交直觉：生活近况到点自然追问、跨周/跨月既视感翻旧账、以及失踪半月以上老熟人冒泡自然感应；支持启动历史回填与单群物理隔离。",
@@ -26,6 +26,8 @@
   },
   "dependencies": [],
   "capabilities": [
+    "api.call",
+    "api.list",
     "chat.get_all_streams",
     "config.get",
     "llm.embed",
